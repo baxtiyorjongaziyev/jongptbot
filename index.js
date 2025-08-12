@@ -3,24 +3,35 @@ import 'dotenv/config';
 import { Telegraf, session } from 'telegraf';
 import OpenAI from 'openai';
 
-// --- Bot va OpenAI ---
-const bot = new Telegraf(process.env.BOT_TOKEN);
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const BOT_TOKEN = process.env.BOT_TOKEN;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
-// --- Session doim mavjud bo'lsin ---
+if (!BOT_TOKEN) {
+  console.error('❌ BOT_TOKEN yo‘q. Railway Variables’da qo‘shing.');
+  process.exit(1);
+}
+if (!OPENAI_API_KEY) {
+  console.error('❌ OPENAI_API_KEY yo‘q. Railway Variables’da qo‘shing.');
+  // chiqib ketmaymiz, lekin AI chaqirilganda foydalanuvchiga tushuntiramiz
+}
+
+const bot = new Telegraf(BOT_TOKEN);
+const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+
+// --- Session har doim mavjud bo‘lsin
 bot.use(session());
 bot.use((ctx, next) => {
   ctx.session ??= {};
   return next();
 });
 
-// --- Global error handler (bot yiqilmasin) ---
+// --- Global error handler
 bot.catch((err, ctx) => {
   console.error('Bot error for update', ctx.update?.update_id, err);
   try { ctx.reply('Serverda kichik nosozlik. Bir daqiqadan so‘ng qayta urinib ko‘ring.'); } catch {}
 });
 
-// --- Start / menyu ---
+// --- Qisqa brend menyu
 const replyMenu = {
   reply_markup: {
     keyboard: [
@@ -32,6 +43,7 @@ const replyMenu = {
   }
 };
 
+// --- Start
 bot.start(async (ctx) => {
   await ctx.reply(
     "Assalomu alaykum! Jon Branding’ga xush kelibsiz. Qulay yo'lni tanlang yoki savolingizni yozing:",
@@ -39,7 +51,7 @@ bot.start(async (ctx) => {
   );
 });
 
-// --- Statik javoblar (tugmalar) ---
+// --- Statik tugmalar
 bot.hears('📦 Paketlar', (ctx) =>
   ctx.reply(
     `Asosiy xizmatlar:
@@ -53,76 +65,86 @@ Savolingizni yozing yoki “🗒️ Buyurtma (AI)” ni bosing.`,
 );
 
 bot.hears('📞 Konsultatsiya', (ctx) =>
-  ctx.reply(
-    '15 daqiqalik qo‘ng‘iroq uchun qulay vaqtni yozing (masalan: "Ertaga 11:30"). AI menedjerimiz yordam beradi.',
-    replyMenu
-  )
+  ctx.reply('Qulay vaqtni yozing (masalan: "Ertaga 11:30"). AI menedjer yordam beradi.', replyMenu)
 );
 
 bot.hears('📷 Portfolio', (ctx) =>
-  ctx.reply(
-    'So‘nggi ishlar: logolar, KU, brandbook.\nTo‘liq portfolio: jonbranding.uz/portfolio',
-    replyMenu
-  )
+  ctx.reply('To‘liq portfolio: jonbranding.uz/portfolio', replyMenu)
 );
 
 bot.hears('☎️ Aloqa', (ctx) =>
-  ctx.reply(
-    'Telefon: +998 97 335 59 00\nTelegram: @baxtiyorjongaziyev\nIsh vaqti: Du–Shan 10:00–19:00',
-    replyMenu
-  )
+  ctx.reply('Telefon: +998 97 335 59 00\nTelegram: @baxtiyorjongaziyev\nIsh vaqti: Du–Shan 10:00–19:00', replyMenu)
 );
 
 bot.hears('🗒️ Buyurtma (AI)', (ctx) =>
-  ctx.reply(
-    'Buyurtma uchun qisqa yozing: biznes nomi, paket, muddat, budjet, kontakt. AI menedjerimiz yordam beradi.',
-    replyMenu
-  )
+  ctx.reply('Qisqacha yozing: biznes nomi, paket, muddat, budjet, kontakt.', replyMenu)
 );
 
-// --- AI javob funksiyasi ---
-async function aiReply(ctx, text) {
+// --- AI javob (fallback bilan)
+async function aiAnswer(text) {
   const system =
     "Sen Jon Branding agentligining AI-assistentisan. Ohang: do'stona, qisqa va ta'sirli. " +
     "Maqsad: mijozni ehtiyojiga qarab yo'naltirish (paketlar, konsultatsiya, buyurtma). " +
     "Kerak bo'lsa savollar berib, qisqa CTA bilan yakunla.";
 
-  const res = await openai.chat.completions.create({
-    model: 'gpt-4o-mini',
-    temperature: 0.4,
-    messages: [
-      { role: 'system', content: system },
-      { role: 'user', content: text }
-    ]
-  });
+  // 1-urinish: gpt-4o-mini, 2-urinish: gpt-4o
+  const tryModels = ['gpt-4o-mini', 'gpt-4o'];
+  let lastErr;
+  for (const model of tryModels) {
+    try {
+      const res = await openai.chat.completions.create({
+        model,
+        temperature: 0.4,
+        messages: [
+          { role: 'system', content: system },
+          { role: 'user', content: text }
+        ]
+      });
+      return res.choices?.[0]?.message?.content?.trim() || '';
+    } catch (e) {
+      lastErr = e;
+      // keyingisiga o‘tamiz
+    }
+  }
+  throw lastErr;
+}
 
-  const answer = res.choices?.[0]?.message?.content?.trim() || 'Savolingizni biroz aniqroq yozing.';
-  await ctx.reply(answer, replyMenu);
+async function aiReply(ctx, text) {
+  if (!OPENAI_API_KEY) {
+    await ctx.reply("AI kaliti o‘rnatilmagan. Iltimos, administrator bilan bog‘laning.", replyMenu);
+    return;
+  }
 
-  // Minimal lead trigger (keyingi bosqichda CRMga yozamiz)
-  if (/(buyurtma|bron|narx|paket|logo)/i.test(text)) {
-    const contact = text.match(/@[\w_]+|\+?\d[\d\s\-]{7,}/)?.[0] || '-';
-    await ctx.reply(
-      `✔️ Yozib oldim. Kontakt: ${contact}. Menejer tez orada bog‘lanadi.`,
-      replyMenu
-    );
+  try {
+    const answer = await aiAnswer(text);
+    const contact = text.match(/@[\w_]+|\+?\d[\d\s\-]{7,}/)?.[0];
+
+    await ctx.reply(answer || 'Savolingizni biroz aniqroq yozing.', replyMenu);
+
+    if (/(buyurtma|bron|narx|paket|logo)/i.test(text)) {
+      await ctx.reply(`✔️ Yozib oldim. Kontakt: ${contact || '-'}. Menejer tez orada bog‘lanadi.`, replyMenu);
+      // Keyingi bosqich: shu yerda Airtable/Webhook ga POST qilamiz
+    }
+  } catch (e) {
+    // foydali log
+    console.error('OpenAI error:', e?.status, e?.message, e?.response?.data);
+    const msg = e?.status === 401
+      ? "AI kaliti noto‘g‘ri yoki muddati tugagan. Admin tekshiradi."
+      : "AI serverida nosozlik. Birozdan so‘ng qayta urinib ko‘ring.";
+    await ctx.reply(msg, replyMenu);
   }
 }
 
-// --- Matnlar uchun AI router ---
+// --- AI router (har qanday matn)
 bot.on('text', async (ctx) => {
-  // eski form bo'lsa tozalaymiz
-  if (ctx.session?.form) ctx.session.form = null;
-
-  try {
-    await aiReply(ctx, ctx.message.text);
-  } catch (e) {
-    console.error(e);
-    await ctx.reply('Serverda kichik nosozlik. Bir daqiqadan so‘ng qayta urinib ko‘ring.');
-  }
+  if (ctx.session?.form) ctx.session.form = null; // eskirgan flow bo‘lsa tozalaymiz
+  await aiReply(ctx, ctx.message.text);
 });
 
-// --- Ishga tushirish ---
+// --- Health check (ixtiyoriy)
+bot.command('health', (ctx) => ctx.reply('OK ✅', replyMenu));
+
+// --- Launch
 bot.launch().then(() => console.log('JonGPTbot (AI) running...'));
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
