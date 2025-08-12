@@ -1,4 +1,5 @@
-// JonGPT — Gemini + state-machine + Business DM + Lead export (TG topic + Airtable) + Contact button
+// JonGPT — Gemini + state-machine + Business DM + Lead export (TG topic + Airtable)
+// + Industry tugmalar + 30s cooldown + Contact button
 import 'dotenv/config';
 import { Telegraf, session, Markup } from 'telegraf';
 import { GoogleGenerativeAI } from '@google/generative-ai';
@@ -7,8 +8,8 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
 // Lead export env
-const LEADS_CHAT_ID = process.env.LEADS_CHAT_ID;           // -100xxxxxxxxxx
-const LEADS_TOPIC_ID = Number(process.env.LEADS_TOPIC_ID || 0); // message_thread_id
+const LEADS_CHAT_ID = process.env.LEADS_CHAT_ID;                 // -100xxxxxxxxxx
+const LEADS_TOPIC_ID = Number(process.env.LEADS_TOPIC_ID || 0);  // message_thread_id
 const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
 const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
 const AIRTABLE_TABLE = process.env.AIRTABLE_TABLE || 'Leads';
@@ -20,7 +21,7 @@ const bot = new Telegraf(BOT_TOKEN);
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
 // ---------- UX/Help ----------
-const AI_ASSIST = false; // erkin savollarda Gemini javobi (tartib uchun hozir o'chirilgan)
+const AI_ASSIST = false; // erkin savolda Gemini qisqa javobi (tartib uchun hozir o‘chiq)
 
 const PACK_HELP =
   "Paketlar:\n" +
@@ -73,6 +74,19 @@ const contactKB = Markup.keyboard([
   ['↩️ Ortga', '❌ Bekor qilish']
 ]).resize();
 
+// Industry tanlash uchun inline keyboard
+const industryKB = {
+  reply_markup: {
+    inline_keyboard: [
+      [{ text: '🍔 HoReCa', callback_data: 'ind_HoReCa' },
+       { text: '🛒 E-commerce', callback_data: 'ind_E-commerce' }],
+      [{ text: '🎓 Education', callback_data: 'ind_Education' },
+       { text: '💄 Beauty', callback_data: 'ind_Beauty' }],
+      [{ text: 'Boshqa', callback_data: 'ind_other' }]
+    ]
+  }
+};
+
 // ---------- Session guard ----------
 bot.use(session());
 bot.use((ctx, next) => {
@@ -80,6 +94,8 @@ bot.use((ctx, next) => {
   ctx.session.data ??= { industry: null, pack: null, due: null, budget: null, contact: null };
   ctx.session.stage ??= 'industry';
   ctx.session.greeted ??= false;
+  ctx.session.lastPrompt ??= null;
+  ctx.session.lastPromptAt ??= 0;
   return next();
 });
 
@@ -137,7 +153,7 @@ bot.start(async (ctx) => {
     lastPromptAt: 0
   };
   await sendMsg(ctx, "Assalomu alaykum! Qulay yo‘lni tanlang yoki qisqacha ehtiyojingizni yozing.", replyMenu);
-  await askCurrentStage(ctx);
+  await askCurrentStage(ctx, { force: true });
 });
 
 // ---------- Extractors ----------
@@ -195,7 +211,7 @@ function nextStage(data) {
 }
 function promptByStage(stage) {
   switch (stage) {
-    case 'industry': return { text: "Sohangiz qaysi? (masalan: HoReCa, e-commerce, ta’lim, beauty...)", extra: replyMenu };
+    case 'industry': return { text: "Sohangiz qaysi? (masalan: HoReCa, e-commerce, ta’lim, beauty...)", extra: industryKB };
     case 'pack':     return { text: "Qaysi xizmat kerak? (Logo / Logo+KU / Full)\n\n" + PACK_HELP, extra: replyMenu };
     case 'due':      return { text: "Muddat qancha? (bugun / ertaga / 2-3 hafta / 1 oy)", extra: replyMenu };
     case 'budget':   return { text: "Budjet oralig‘i? (S / M / L yoki arzon/o‘rtacha/qimmat)\n\n" + BUDGET_HELP, extra: replyMenu };
@@ -203,9 +219,12 @@ function promptByStage(stage) {
     default:         return null;
   }
 }
-async function askCurrentStage(ctx) {
+async function askCurrentStage(ctx, { force = false } = {}) {
   const now = Date.now();
-  if (ctx.session.lastPrompt === ctx.session.stage && now - (ctx.session.lastPromptAt || 0) < 8000) return;
+  const same = ctx.session.lastPrompt === ctx.session.stage;
+  const fresh = now - (ctx.session.lastPromptAt || 0) < 30_000; // 30s cooldown
+  if (!force && same && fresh) return;
+
   const q = promptByStage(ctx.session.stage);
   if (q) {
     await sendMsg(ctx, q.text, q.extra);
@@ -296,9 +315,11 @@ bot.on('contact', async (ctx) => {
     } else {
       await sendMsg(ctx, "Kontaktni ola olmadim. Iltimos, tugmani qayta bosing yoki raqamni yozing.");
     }
+    const before = ctx.session.stage;
     ctx.session.stage = nextStage(ctx.session.data);
-    if (ctx.session.stage !== 'done') {
-      await askCurrentStage(ctx);
+    const after = ctx.session.stage;
+    if (after !== 'done') {
+      await askCurrentStage(ctx, { force: after !== before });
     } else {
       await finalizeLead(ctx);
     }
@@ -327,20 +348,27 @@ bot.on('text', async (ctx) => {
     return;
   }
 
-  // Ma’lumotlarni yig‘amiz
+  // FAKTLARNI YANGILASH (faqat foydali ma'lumot bo‘lsa stage o‘zgaradi)
+  const before = ctx.session.stage;
   const facts = extractFacts(text);
   ctx.session.data = mergeData(ctx.session.data, facts);
   ctx.session.stage = nextStage(ctx.session.data);
+  const after = ctx.session.stage;
 
-  if (ctx.session.stage !== 'done') {
-    await askCurrentStage(ctx);
-    if (AI_ASSIST && !facts.industry && !facts.pack && !facts.due && !facts.budget && !facts.contact) {
-      await aiAssist(ctx, text);
+  if (after !== 'done') {
+    if (after !== before) {
+      // Yangi bosqich → majburan so‘raymiz
+      await askCurrentStage(ctx, { force: true });
+    } else {
+      // Bir xil bosqich: 30s cooldown bilan, va faqat info bermagan bo‘lsa
+      const noInfo = !facts.industry && !facts.pack && !facts.due && !facts.budget && !facts.contact;
+      if (noInfo) await askCurrentStage(ctx);
+      if (AI_ASSIST && noInfo) await aiAssist(ctx, text);
     }
     return;
   }
 
-  // DONE → yakuniy xulosa + CTA + EXPORT
+  // DONE → yakuniy xulosa + EXPORT
   await finalizeLead(ctx);
 });
 
@@ -369,20 +397,43 @@ Keyingi qadamni tanlang:`;
 
 // ---------- Callbacks ----------
 bot.on('callback_query', async (ctx) => {
-  const d = ctx.callbackQuery?.data;
+  const d = ctx.callbackQuery?.data || '';
   if (!d) return ctx.answerCbQuery();
 
+  // Industry tanlovlari
+  if (d.startsWith('ind_')) {
+    const map = {
+      ind_HoReCa: 'HoReCa',
+      ind_Ecommerce: 'E-commerce',
+      'ind_E-commerce': 'E-commerce',
+      ind_Education: 'Education',
+      ind_Beauty: 'Beauty',
+      ind_other: null
+    };
+    const val = map[d] ?? null;
+    if (val) ctx.session.data.industry = val;
+    await ctx.answerCbQuery('Tanlandi: ' + (val || 'Boshqa'));
+    const before = ctx.session.stage;
+    ctx.session.stage = nextStage(ctx.session.data);
+    const after = ctx.session.stage;
+    if (after !== 'done') {
+      await askCurrentStage(ctx, { force: after !== before });
+    } else {
+      await finalizeLead(ctx);
+    }
+    return;
+  }
+
+  // Buyurtma/konsultatsiya
   if (d === 'make_order') {
     await ctx.answerCbQuery('Buyurtma qabul qilindi ✅');
     await sendMsg(ctx, 'Rahmat! Menejer tez orada bog‘lanadi. Yana savol bo‘lsa, yozib qoldiring.');
     return;
   }
-
   if (d === 'call_pick') {
     await ctx.answerCbQuery();
     return sendMsg(ctx, 'Qulay vaqtni tanlang yoki yozib yuboring (masalan: "Ertaga 11:30").', consultKB);
   }
-
   if (d.startsWith('call_')) {
     const label = d === 'call_today' ? 'bugun' : d === 'call_tomorrow' ? 'ertaga' : 'ushbu hafta';
     ctx.session.data.due ??= label;
@@ -402,6 +453,6 @@ bot.command('id', async (ctx) => {
 
 bot.command('health', (ctx) => sendMsg(ctx, 'OK ✅'));
 
-bot.launch().then(() => console.log('JonGPTbot (Gemini/state + leads + contact-btn) running...'));
+bot.launch().then(() => console.log('JonGPTbot (Gemini/state + leads + contact-btn + cooldown) running...'));
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
