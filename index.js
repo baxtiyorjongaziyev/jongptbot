@@ -69,7 +69,7 @@ bot.hears('📞 Konsultatsiya', (ctx) =>
 );
 
 bot.hears('📷 Portfolio', (ctx) =>
-  ctx.reply('To‘liq portfolio: jonbranding.uz/portfolio', replyMenu)
+  ctx.reply('To‘liq portfolio: https://t.me/JonBranding', replyMenu)
 );
 
 bot.hears('☎️ Aloqa', (ctx) =>
