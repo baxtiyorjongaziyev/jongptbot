@@ -1,262 +1,75 @@
-// JonGPT (Node.js) — Gemini Free Tier + Telegraf + CRM topic export (no Airtable)
-require('dotenv').config();
-const { Telegraf, Markup, session } = require('telegraf');
+import logging
+from telegram import (
+    Update, 
+    ReplyKeyboardMarkup, 
+    KeyboardButton
+)
+from telegram.ext import (
+    ApplicationBuilder, 
+    CommandHandler, 
+    MessageHandler, 
+    filters, 
+    ContextTypes
+)
+import requests
 
-const BOT_TOKEN = process.env.BOT_TOKEN;
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const LEADS_CHAT_ID = process.env.LEADS_CHAT_ID;           // -100...
-const LEADS_TOPIC_ID = Number(process.env.LEADS_TOPIC_ID); // 52
+# --- CONFIG ---
+BOT_TOKEN = "7738413085:AAE_CYNnbpyoW5KiheUTJOPBmz_jHLVWgWc"  # Siz bergan token
+GEMINI_API_KEY = "AIzaSyCCEjoylaZekaQXH0We7DU0u3W66igQEZQ"
 
-if (!BOT_TOKEN) { console.error('❌ BOT_TOKEN yo‘q'); process.exit(1); }
-if (!GEMINI_API_KEY) console.warn('⚠️ GEMINI_API_KEY yo‘q — AI javobi ishlamasligi mumkin');
+# --- LOGGING ---
+logging.basicConfig(level=logging.INFO)
 
-const bot = new Telegraf(BOT_TOKEN);
-
-// ---------- Helpers ----------
-const contactKB = Markup.keyboard([
-  [Markup.button.contactRequest('📱 Kontaktimni yuborish')],
-  ['❌ Bekor qilish']
-]).resize();
-
-const replyMenu = {
-  reply_markup: {
-    keyboard: [
-      ['📦 Paketlar', '🗒️ Buyurtma (AI)'],
-      ['📞 Konsultatsiya', '📷 Portfolio'],
-      ['☎️ Aloqa']
-    ],
-    resize_keyboard: true
-  }
-};
-
-function nextStage(data) {
-  if (!data.pack) return 'pack';
-  if (!data.due) return 'due';
-  if (!data.budget) return 'budget';
-  if (!data.contact) return 'contact';
-  return 'done';
-}
-
-function promptByStage(stage) {
-  switch (stage) {
-    case 'pack':
-      return {
-        text: "Qaysi paket mos?\n• Logo\n• Logo + Korporativ uslub (KU)\n• Full (Logo+KU+Brandbook)",
-        extra: replyMenu
-      };
-    case 'due':
-      return { text: "Muddat qancha? (bugun / ertaga / 2-3 hafta / 1 oy)", extra: replyMenu };
-    case 'budget':
-      return { text: "Budjet oralig‘i? (S/M/L yoki arzon/o‘rtacha/qimmat)", extra: replyMenu };
-    case 'contact':
-      return { text: "📱 Kontakt raqam yoki @username qoldirasizmi?", extra: contactKB };
-    default:
-      return null;
-  }
-}
-
-function extractFacts(text) {
-  const t = (text || '').toLowerCase();
-  const pack =
-    /\bfull\b/.test(t) ? 'Full' :
-    /logo\s*\+\s*(ku|korporativ|uslub)/i.test(text) ? 'Logo+KU' :
-    /\blogo\b/i.test(text) ? 'Logo' : null;
-
-  const due =
-    (/(bugun|ertaga)/.test(t) && (t.includes('bugun') ? 'bugun' : 'ertaga')) ||
-    (/(2-3 hafta|1 oy|hafta|oy)/.test(t) && (t.match(/2-3 hafta|1 oy|hafta|oy/)?.[0])) || null;
-
-  const budget =
-    (/\b([sml])\b/i.test(text) ? text.match(/\b([sml])\b/i)[1].toUpperCase() : null) ||
-    (text.match(/arzon|o'rtacha|qimmat/i)?.[0] || null);
-
-  let contact = text.match(/@[\w_]+|\+?\d[\d\s\-()]{7,}/)?.[0] || null;
-  if (!contact) {
-    const m = text.match(/kontakt\s+(@?\w{3,})/i);
-    if (m) contact = m[1].startsWith('@') ? m[1] : '@' + m[1];
-  }
-  return { pack, due, budget, contact };
-}
-
-function mergeData(dst, src) {
-  return {
-    pack: dst.pack || src.pack,
-    due: dst.due || src.due,
-    budget: dst.budget || src.budget,
-    contact: dst.contact || src.contact
-  };
-}
-
-function leadText(p, ctx) {
-  const who = `${ctx.from?.first_name || ''} ${ctx.from?.last_name || ''}`.trim() || ctx.from?.username || ctx.from?.id;
-  return (
-`🆕 Yangi lead
-👤 Mijoz: ${who} (@${ctx.from?.username || '-'})
-🧩 Xizmat: ${p.pack || '-'}
-⏰ Muddat: ${p.due || '-'}
-💰 Budjet: ${p.budget || '-'}
-📱 Kontakt: ${p.contact || '-'}
-📨 Manba: Telegram Bot
-🕒 ${new Date().toLocaleString('uz-UZ')}`
-  );
-}
-
-async function exportLeadToTopic(ctx, data) {
-  if (!LEADS_CHAT_ID || !LEADS_TOPIC_ID) return;
-  try {
-    await ctx.telegram.sendMessage(
-      LEADS_CHAT_ID,
-      leadText(data, ctx),
-      { message_thread_id: LEADS_TOPIC_ID }
-    );
-  } catch (e) {
-    console.error('CRM topic error:', e?.message);
-  }
-}
-
-// ---------- Gemini (Free Tier) ----------
-async function geminiReply(userText) {
-  if (!GEMINI_API_KEY) return null;
-  try {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`;
-    const body = {
-      contents: [{
-        parts: [{
-          text:
-`Sen Jon Branding AI-assistentisan. Ohang do‘stona, qisqa, yo‘naltiruvchi.
-Maqsad: paket/due/budget/contact ma’lumotlarini muloyim so‘rab, lead yig‘ish.
-Foydalanuvchi so‘rovi: ${userText}`
-        }]
-      }]
-    };
-    const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    const j = await r.json();
-    const text = j?.candidates?.[0]?.content?.parts?.[0]?.text;
-    return text?.trim() || null;
-  } catch (e) {
-    console.error('Gemini error:', e?.message);
-    return null;
-  }
-}
-
-// ---------- Session ----------
-bot.use(session());
-bot.use((ctx, next) => {
-  ctx.session ??= {};
-  ctx.session.data ??= { pack: null, due: null, budget: null, contact: null };
-  ctx.session.stage ??= 'pack';
-  ctx.session.lastPrompt ??= null;
-  ctx.session.lastPromptAt ??= 0;
-  return next();
-});
-
-// ---------- Commands & static buttons ----------
-bot.start(async (ctx) => {
-  ctx.session = { data: { pack: null, due: null, budget: null, contact: null }, stage: 'pack', lastPrompt: null, lastPromptAt: 0 };
-  await ctx.reply("Assalomu alaykum! Qulay yo‘lni tanlang yoki qisqacha ehtiyojingizni yozing.", replyMenu);
-  const q = promptByStage('pack');
-  await ctx.reply(q.text, q.extra);
-});
-
-bot.hears('📷 Portfolio', (ctx) =>
-  ctx.reply('To‘liq portfolio: https://t.me/JonBranding', {
-    reply_markup: { inline_keyboard: [[{ text: '🔗 Portfolio kanali', url: 'https://t.me/JonBranding' }]] }
-  })
-);
-
-bot.hears('☎️ Aloqa', (ctx) =>
-  ctx.reply('Telefon: +998 33 645 00 97\nTelegram: @baxtiyorjongaziyev\nIsh vaqti: Du–Shan 10:00–19:00', {
-    reply_markup: {
-      inline_keyboard: [
-        [{ text: '📞 Qo‘ng‘iroq qilish', url: 'tel:+998336450097' }],
-        [{ text: '✉️ Telegram yozish', url: 'https://t.me/baxtiyorjongaziyev' }]
-      ]
+# --- GEMINI AI FUNKSIYA ---
+def gemini_reply(prompt):
+    url = "https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent"
+    headers = {"Content-Type": "application/json"}
+    params = {"key": GEMINI_API_KEY}
+    data = {
+        "contents": [
+            {
+                "parts": [{"text": prompt}]
+            }
+        ]
     }
-  })
-);
+    r = requests.post(url, headers=headers, params=params, json=data)
+    if r.status_code == 200:
+        return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+    else:
+        return "Uzr, hozircha javob bera olmayapman."
 
-bot.hears('📦 Paketlar', (ctx) => {
-  const q = promptByStage('pack');
-  ctx.reply(q.text, q.extra);
-});
+# --- START COMMAND ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = "Assalomu alaykum! 😊\nQaysi xizmat sizga mos?\n0) Naming\n1) Logo\n2) Korporativ uslub\n3) Brandbook"
+    await update.message.reply_text(msg)
 
-bot.hears('📞 Konsultatsiya', (ctx) =>
-  ctx.reply('Qulay vaqtni yozing (masalan: "Ertaga 11:30").', replyMenu)
-);
+# --- TEXT HANDLER ---
+async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_text = update.message.text
 
-bot.hears('🗒️ Buyurtma (AI)', (ctx) =>
-  ctx.reply('Qisqacha yozing: xizmat (Logo/Logo+KU/Full), muddat, budjet, kontakt.', replyMenu)
-);
+    # AI orqali javob
+    ai_prompt = f"Sen professional, samimiy va qisqa gapiradigan maslahatchi sotuvchisiz. Mijozdan ehtiyojini aniqlab, bosqichma-bosqich olib borasan, ammo to'g'ridan-to'g'ri tiqishtirmaysan. Mijoz: {user_text}"
+    ai_reply = gemini_reply(ai_prompt)
 
-// ---------- Contact handler ----------
-bot.on('contact', async (ctx) => {
-  const phone = ctx.message?.contact?.phone_number;
-  if (phone) {
-    ctx.session.data.contact = phone;
-    await ctx.reply(`✔️ Kontakt oldim: ${phone}`, replyMenu);
-  } else {
-    await ctx.reply('Kontaktni ola olmadim. Tugmani qayta bosing yoki raqamni yozing.');
-  }
-  ctx.session.stage = nextStage(ctx.session.data);
-  if (ctx.session.stage === 'done') return finalize(ctx);
-  const q = promptByStage(ctx.session.stage);
-  await ctx.reply(q.text, q.extra);
-});
+    await update.message.reply_text(ai_reply)
 
-// ---------- Text router (AI + state) ----------
-bot.on('text', async (ctx) => {
-  const text = ctx.message.text?.trim() || '';
+    # Agar foydalanuvchi xizmatni tanlagan bo'lsa, kontakt tugmasini yuborish
+    if any(word in user_text.lower() for word in ["naming", "logo", "uslub", "brandbook"]):
+        contact_btn = KeyboardButton("📱 Kontaktimni yuborish", request_contact=True)
+        kb = ReplyKeyboardMarkup([[contact_btn]], resize_keyboard=True, one_time_keyboard=True)
+        await update.message.reply_text("Zo'r! Endi bog'lanish uchun kontakt yuboring 👇", reply_markup=kb)
 
-  // Tez izohlar
-  if (/ku nima|full nima/i.test(text)) {
-    await ctx.reply("• Logo — faqat logotip\n• Logo+KU — logotip + korporativ uslub\n• Full — Logo+KU + brandbook + social dizaynlar");
-    return;
-  }
-  if (/(s ?m ?l nima|budjet nima|s nima|m nima|l nima)/i.test(text)) {
-    await ctx.reply("Budjet o‘lchami: S—minimal, M—o‘rtacha, L—kengaytirilgan. Tanlang yoki arzon/o‘rtacha/qimmat deb yozing.");
-    return;
-  }
+# --- CONTACT HANDLER ---
+async def save_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    contact = update.message.contact
+    await update.message.reply_text(f"Rahmat! Telefon raqamingiz qabul qilindi: {contact.phone_number}")
+    # Bu yerda siz contactni Airtable yoki boshqa joyga saqlash kodingizni qo‘shishingiz mumkin
 
-  // State update
-  const before = ctx.session.stage;
-  const facts = extractFacts(text);
-  ctx.session.data = mergeData(ctx.session.data, facts);
-  ctx.session.stage = nextStage(ctx.session.data);
-  const after = ctx.session.stage;
+# --- MAIN ---
+app = ApplicationBuilder().token(BOT_TOKEN).build()
+app.add_handler(CommandHandler("start", start))
+app.add_handler(MessageHandler(filters.CONTACT, save_contact))
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat))
 
-  // AI javob (muloyim yo‘naltirish)
-  const ai = await geminiReply(text);
-  if (ai) await ctx.reply(ai);
-
-  if (after !== 'done') {
-    if (after !== before) {
-      const q = promptByStage(after);
-      if (q) await ctx.reply(q.text, q.extra);
-    }
-    return;
-  }
-  await finalize(ctx);
-});
-
-async function finalize(ctx) {
-  const p = ctx.session.data;
-  const summary =
-`✔️ Yozib oldim:
-• Xizmat: ${p.pack}
-• Muddat: ${p.due}
-• Budjet: ${p.budget}
-• Kontakt: ${p.contact}
-
-Rahmat! Menejer tez orada bog‘lanadi.`;
-  await ctx.reply(summary, replyMenu);
-  await exportLeadToTopic(ctx, p);
-  ctx.session.stage = 'done';
-}
-
-// ---------- Health ----------
-bot.command('health', (ctx) => ctx.reply('OK ✅'));
-
-// ---------- Launch (polling) ----------
-bot.launch().then(() => console.log('JonGPTbot (Node + Gemini Free Tier) running...'));
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+if __name__ == "__main__":
+    app.run_polling()
