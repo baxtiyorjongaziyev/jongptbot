@@ -1,257 +1,89 @@
-// Jon.Branding AI Bot — Telegraf + Gemini Free Tier + Persistent Memory + CRM topic
-require('dotenv').config();
-const { Telegraf, Markup, session } = require('telegraf');
-const storage = require('node-persist');
+// JonGPT Business Assistant — Telegraf + Bots for Business + Lead funnel
+// - Business DM uchun business_connection_id qo'shiladi
+// - Qisqa, odamona savol-javoblar
+// - Mijozdan: xizmat, muddat, taxminiy budjet va kontakt olinadi
+// - "Kontaktimni yuborish" tugmasi bor
+// - (ixtiyoriy) leadni Team guruhingizdagi CRM topicga yuboradi
 
-// ====== ENV ======
-const BOT_TOKEN      = process.env.BOT_TOKEN;
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const LEADS_CHAT_ID  = process.env.LEADS_CHAT_ID;           // ex: -1002566480563
-const LEADS_TOPIC_ID = Number(process.env.LEADS_TOPIC_ID);  // ex: 52
+import 'dotenv/config';
+import { Telegraf, Markup, session } from 'telegraf';
 
-if (!BOT_TOKEN) { console.error('❌ BOT_TOKEN yo‘q'); process.exit(1); }
-if (!GEMINI_API_KEY) console.warn('⚠️ GEMINI_API_KEY yo‘q — AI javoblari cheklanadi');
+// ==== ENV ====
+const BOT_TOKEN        = process.env.BOT_TOKEN;            // Telegram bot token
+const LEADS_CHAT_ID    = process.env.LEADS_CHAT_ID || '';  // -100.... (ixtiyoriy)
+const LEADS_TOPIC_ID   = Number(process.env.LEADS_TOPIC_ID || 0); // topic id (ixtiyoriy)
 
-// ====== BOT ======
+if (!BOT_TOKEN) {
+  console.error('❌ BOT_TOKEN topilmadi. Railway Variables ga qo‘ying.');
+  process.exit(1);
+}
+
+// ==== Bot ====
 const bot = new Telegraf(BOT_TOKEN);
 
-// ====== PERSISTENT MEMORY ======
-(async () => {
-  await storage.init({ dir: 'data_store', stringify: JSON.stringify, parse: JSON.parse });
-})();
-
-async function getMem(userId) {
-  const key = `u:${userId}`;
-  return (await storage.getItem(key)) || {
-    pack: null,
-    due: null,
-    intent: null,       // e.g. “naming”, “logo”, ...
-    industry: null,
-    pains: [],          // og‘riq-nuqtalar
-    goals: [],          // maqsadlar
-    contact: null,
-    stage: 'pack',
-    lastQuestion: null,
-    updatedAt: Date.now()
-  };
+// Business DM: har bir sendMessage ga business_connection_id qo'shish helperi
+function bcExtra(ctx) {
+  const id =
+    ctx.message?.business_connection_id ||
+    ctx.callbackQuery?.message?.business_connection_id ||
+    ctx.update?.business_connection?.id;
+  return id ? { business_connection_id: id } : {};
 }
-async function setMem(userId, patch = {}) {
-  const key = `u:${userId}`;
-  const cur = await getMem(userId);
-  const next = { ...cur, ...patch, updatedAt: Date.now() };
-  await storage.setItem(key, next);
-  return next;
+async function send(ctx, text, extra = {}) {
+  const chatId = ctx.chat?.id ?? ctx.from?.id;
+  return ctx.telegram.sendMessage(chatId, text, { ...extra, ...bcExtra(ctx) });
 }
 
-// ====== UI ======
-const kbMain = {
-  reply_markup: {
-    keyboard: [
-      ['📦 Xizmatlar', '🗒️ Buyurtma (AI)'],
-      ['📞 Konsultatsiya', '📷 Portfolio'],
-      ['☎️ Aloqa']
-    ],
-    resize_keyboard: true
-  }
-};
-const kbContact = Markup.keyboard([
+// ==== UI ====
+const mainKB = Markup.keyboard([
+  ['📦 Xizmatlar', '🗒️ Buyurtma (AI)'],
+  ['💬 Konsultatsiya', '📷 Portfolio'],
+  ['☎️ Aloqa']
+]).resize();
+
+const contactKB = Markup.keyboard([
   [Markup.button.contactRequest('📱 Kontaktimni yuborish')],
   ['↩️ Ortga', '❌ Bekor qilish']
 ]).resize();
 
-const kbDueInline = {
-  reply_markup: {
-    inline_keyboard: [
-      [{ text: '📞 Bugun', callback_data: 'due_today' },
-       { text: '📅 Ertaga', callback_data: 'due_tomorrow' }],
-      [{ text: '🗓 Sana yozaman', callback_data: 'due_custom' }]
-    ]
-  }
-};
+const timeKB = Markup.inlineKeyboard([
+  [Markup.button.callback('📞 Bugun', 'due_today'), Markup.button.callback('📅 Ertaga', 'due_tomorrow')],
+  [Markup.button.callback('🗓 Shu hafta', 'due_week')]
+]);
 
-function promptByStage(mem) {
-  switch (mem.stage) {
-    case 'pack':
-      return {
-        text:
-`Qaysi xizmat hozir kerak?
-• Naming (nom tanlash)
-• Logo (faqat logotip)
-• Korporativ uslub (logo + ko‘rinish)
-• Brandbook (to‘liq qo‘llanma)
+const budgetKB = Markup.inlineKeyboard([
+  [Markup.button.callback('📌 Minimal', 'b_min')],
+  [Markup.button.callback('📌 O‘rtacha', 'b_mid')],
+  [Markup.button.callback('📌 Kengaytirilgan', 'b_max')]
+]);
 
-Qisqacha yozing: masalan “Naming” yoki “Logo + uslub”.`,
-        extra: kbMain
-      };
-    case 'due':     return { text: "Qachongacha rejalashtiryapsiz? Tugmadan tanlang yoki yozing:", extra: kbDueInline };
-    case 'intent':  return { text: "Qaysi sohada faoliyat yuritasiz? (masalan: restoran, o‘quv markaz, onlayn do‘kon...)", extra: kbMain };
-    case 'pains':   return { text: "Asosiy muammo nimada? (masalan: tanimayapti, ko‘rinish tartibsiz, qimmat sota olmayapman...)", extra: kbMain };
-    case 'goals':   return { text: "Qisqacha maqsadingizni yozing (masalan: sotuvni oshirish, premium segmentga chiqish...)", extra: kbMain };
-    case 'contact': return { text: "📱 Bog‘lanish uchun kontaktingizni yuborasizmi? (tugma bosib yuborishingiz mumkin)", extra: kbContact };
-    default:        return null;
-  }
-}
+const servicesText =
+`Qaysi xizmat kerak?
+0) Naming — brend nomi
+1) Logo — logotip
+2) Korporativ uslub — rang/shrift/qoidalar
+3) Brandbook — to‘liq qo‘llanma
 
-function nextStage(mem) {
-  if (!mem.pack)     return 'pack';
-  if (!mem.due)      return 'due';
-  if (!mem.industry) return 'intent';
-  if (!mem.pains?.length) return 'pains';
-  if (!mem.goals?.length) return 'goals';
-  if (!mem.contact)  return 'contact';
-  return 'done';
-}
+Qisqacha yozing: masalan "Logo" yoki "Logo + uslub".`;
 
-// ====== SESSION (light) ======
+// ==== Session (in-memory) ====
 bot.use(session());
 bot.use((ctx, next) => {
-  ctx.session ??= { lastPromptKey: '', cooldownAt: 0, pushyOff: false };
+  ctx.session ??= {};
+  ctx.session.lead ??= { service: null, due: null, budget: null, contact: null };
+  ctx.session.stage ??= 'service'; // service -> due -> budget -> contact -> done
   return next();
 });
-function shouldCooldown(ctx, key) {
-  const now = Date.now();
-  if (ctx.session.lastPromptKey === key && (now - ctx.session.cooldownAt) < 12000) return true; // 12s
-  ctx.session.lastPromptKey = key;
-  ctx.session.cooldownAt = now;
-  return false;
-}
 
-// ====== PARSERS ======
-function extractFacts(text) {
-  const t = (text || '').toLowerCase();
-  const pack =
-    /(naming)/i.test(text) ? 'Naming' :
-    /(logo\s*\+\s*(uslub|korporativ)|logo\+uslub|logo\+ku)/i.test(text) ? 'Logo + Korporativ uslub' :
-    /\blogo\b/i.test(text) ? 'Logo' :
-    /(brandbook|brendb(u|o)k)/i.test(text) ? 'Brandbook' : null;
-
-  const due =
-    t.includes('bugun')   ? 'bugun'   :
-    t.includes('ertaga')  ? 'ertaga'  :
-    null;
-
-  const industry =
-    /(restoran|kafe|fast ?food|horeca)/i.test(t) ? 'HoReCa' :
-    /(ta\'?lim|kurs|o\'quv markaz|education)/i.test(t) ? 'Education' :
-    /(onlayn|internet).{0,5}do\'?kon|e-?commerce|marketpleys/i.test(t) ? 'E-commerce' :
-    /(go\'?zallik|salon|beauty)/i.test(t) ? 'Beauty' :
-    null;
-
-  // pains & goals – oddiy heuristika (kalit so‘z)
-  const pains = [];
-  if (/tanimayap(ti|di)|ko\'?rinish.*tartibsiz|eskirgan|qimmat.*sota.*olmay|sotuv.*tush/i.test(t)) pains.push(text);
-  const goals = [];
-  if (/sotuv.*osh|premium|bozor.*kirish|ajralib.*tur/i.test(t)) goals.push(text);
-
-  // contact
-  let contact = text.match(/@[\w_]+|\+?\d[\d\s\-()]{7,}/)?.[0] || null;
-
-  return { pack, due, industry, pains, goals, contact };
-}
-
-function mergeMem(mem, facts) {
-  const merged = { ...mem };
-  if (facts.pack) merged.pack = facts.pack;
-  if (facts.due) merged.due = facts.due;
-  if (facts.industry) merged.industry = facts.industry;
-  if (facts.pains?.length) merged.pains = Array.from(new Set([...(mem.pains || []), ...facts.pains]));
-  if (facts.goals?.length) merged.goals = Array.from(new Set([...(mem.goals || []), ...facts.goals]));
-  if (facts.contact) merged.contact = facts.contact;
-  return merged;
-}
-
-// ====== AI (Gemini) — narx aytmasin! ======
-async function geminiReply(userText, { pushyOff, mem }) {
-  if (!GEMINI_API_KEY) return null;
-  try {
-    const tone = pushyOff ? 'yumshoq, bitta savol yoki bitta maslahat' : 'qisqa, samimiy, bitta savol';
-    const persona =
-`Sen Jon.Branding’ning maslahatchi-assistentisan.
-— TIL: sodda, mijoz tilida. KU/SML kabi qisqartmalarni ishlatma.
-— NARX: hech qachon narx aytma. Narx so‘ralsa: “loyiha hajmiga qarab aniqlanadi, bepul konsultatsiyada tez baholab beramiz” deb ayt va kontakt so‘ra.
-— MAQSAD: ehtiyojni och, mos yechimdan birini muloyim taklif qil, yumshoq CTA (kontakt).
-— Paketlar: Naming / Logo / Korporativ uslub (Logo + ko‘rinish) / Brandbook.
-— Xotira: foydalanuvchi avval aytganlarini eslatib, takror so‘rama: ${JSON.stringify({pack: mem.pack, due: mem.due, industry: mem.industry})}
-— CHEK: 1–2 jumla, ortiqcha metafora yo‘q.`;
-
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`;
-    const body = { contents: [{ parts: [{ text: `${persona}\n\nFoydalanuvchi: ${userText}` }]}]};
-    const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    const j = await r.json();
-    return j?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || null;
-  } catch (e) {
-    console.error('Gemini error:', e?.message);
-    return null;
-  }
-}
-
-// ====== CRM EXPORT ======
-function leadText(mem, ctx) {
-  const who = `${ctx.from?.first_name || ''} ${ctx.from?.last_name || ''}`.trim() || ctx.from?.username || ctx.from?.id;
-  return (
-`🆕 Yangi lead
-👤 Mijoz: ${who} (@${ctx.from?.username || '-'})
-🧩 Xizmat: ${mem.pack || '-'}
-🏷 Soha: ${mem.industry || '-'}
-⏰ Muddat: ${mem.due || '-'}
-🎯 Maqsad: ${(mem.goals||[]).slice(-1)[0] || '-'}
-😣 Muammo: ${(mem.pains||[]).slice(-1)[0] || '-'}
-📱 Kontakt: ${mem.contact || '-'}
-📨 Manba: Telegram Bot
-🕒 ${new Date().toLocaleString('uz-UZ')}`
-  );
-}
-async function exportLeadToTopic(ctx, mem) {
-  if (!LEADS_CHAT_ID || !LEADS_TOPIC_ID) return;
-  try {
-    await ctx.telegram.sendMessage(LEADS_CHAT_ID, leadText(mem, ctx), { message_thread_id: LEADS_TOPIC_ID });
-  } catch (e) { console.error('CRM topic error:', e?.message); }
-}
-
-// ====== HELPERS ======
-async function askStage(ctx, mem, force=false) {
-  const key = `ask:${mem.stage}`;
-  if (!force && shouldCooldown(ctx, key)) return;
-  const q = promptByStage(mem);
-  if (q) {
-    await ctx.reply(q.text, q.extra);
-    await setMem(ctx.from.id, { lastQuestion: q.text });
-  }
-}
-async function finalize(ctx, mem) {
-  const summary =
-`✔️ Yozib oldim:
-• Xizmat: ${mem.pack || '-'}
-• Soha: ${mem.industry || '-'}
-• Muddat: ${mem.due || '-'}
-• Maqsad: ${(mem.goals||[]).slice(-1)[0] || '-'}
-• Kontakt: ${mem.contact || '-'}
-
-Rahmat! Menejer tez orada bog‘lanadi.`;
-  await ctx.reply(summary, kbMain);
-  await exportLeadToTopic(ctx, mem);
-  await setMem(ctx.from.id, { stage: 'done' });
-}
-
-// ====== FLOWS ======
-bot.start(async (ctx) => {
-  const mem = await setMem(ctx.from.id, { stage: 'pack' });
-  if (mem.pack || mem.contact) {
-    await ctx.reply(`Salom! O‘tgan safar ${mem.pack ? `"${mem.pack}"` : 'ma’lumot'} deb yozgandingiz. Davom etamizmi?`, kbMain);
-  } else {
-    await ctx.reply("Salom! 30 soniyada ehtiyojingizni aniqlaymiz va mos taklif beramiz. Boshladik. ✅", kbMain);
-  }
-  await askStage(ctx, mem, true);
-});
-
-// Static
+// ==== Statik tugmalar ====
 bot.hears('📷 Portfolio', (ctx) =>
-  ctx.reply('To‘liq portfolio: https://t.me/JonBranding', {
+  send(ctx, 'To‘liq portfolio: https://t.me/JonBranding', {
     reply_markup: { inline_keyboard: [[{ text: '🔗 Portfolio kanali', url: 'https://t.me/JonBranding' }]] }
   })
 );
+
 bot.hears('☎️ Aloqa', (ctx) =>
-  ctx.reply('Telefon: +998 33 645 00 97\nTelegram: @baxtiyorjongaziyev\nIsh vaqti: Du–Shan 10:00–19:00', {
+  send(ctx, 'Telefon: +998 33 645 00 97\nTelegram: @baxtiyorjongaziyev\nIsh vaqti: Du–Shan 10:00–19:00', {
     reply_markup: {
       inline_keyboard: [
         [{ text: '📞 Qo‘ng‘iroq qilish', url: 'tel:+998336450097' }],
@@ -260,103 +92,213 @@ bot.hears('☎️ Aloqa', (ctx) =>
     }
   })
 );
-bot.hears('📦 Xizmatlar', async (ctx) => {
-  const mem = await getMem(ctx.from.id);
-  await askStage(ctx, mem, true);
-});
-bot.hears('📞 Konsultatsiya', (ctx) => ctx.reply('Qulay vaqtni yozing (masalan: “Ertaga 11:30”).', kbMain));
-bot.hears('🗒️ Buyurtma (AI)', (ctx) =>
-  ctx.reply('Qisqacha yozing: xizmat (Naming/Logo/Uslub/Brandbook), muddat, soha, maqsad, kontakt.', kbMain)
+
+bot.hears('📦 Xizmatlar', (ctx) => send(ctx, servicesText, mainKB));
+
+bot.hears('💬 Konsultatsiya', (ctx) =>
+  send(ctx, 'Qulay vaqtni tanlang yoki “Ertaga 11:30” yozib yuboring.', timeKB)
 );
 
-// “narx” so‘ralsa — hech qachon narx aytmaslik
-bot.on('text', async (ctx, next) => {
-  const t = (ctx.message.text || '').toLowerCase();
-  if (/narx|price|\$|so'm|som|sum/i.test(t)) {
-    await ctx.reply("Narx loyihaning hajmi va maqsadiga qarab shakllanadi. Bepul qisqa konsultatsiyada 10 daqiqada baholab beraman. 📱 Kontaktingizni yuborasizmi?", kbContact);
-    return; // AI chaqirmaymiz
-  }
-  return next();
+bot.hears('🗒️ Buyurtma (AI)', (ctx) =>
+  send(ctx, 'Qisqacha yozing: xizmat (Naming/Logo/Uslub/Brandbook), muddat, taxminiy budjet, kontakt.', mainKB)
+);
+
+// ==== Start / Greeting ====
+bot.start(async (ctx) => {
+  ctx.session.lead = { service: null, due: null, budget: null, contact: null };
+  ctx.session.stage = 'service';
+  await send(ctx, 'Assalomu alaykum! Men maslahatchiman. Qisqa savollar bilan ehtiyojingizni aniqlayman. ✅', mainKB);
+  await askByStage(ctx, true);
 });
 
-// Contact — darhol CRMga
-bot.on('contact', async (ctx) => {
-  const phone = ctx.message?.contact?.phone_number;
-  if (phone) {
-    const mem = await setMem(ctx.from.id, { contact: phone });
-    await ctx.reply(`✔️ Kontakt oldim: ${phone}\nCRMga yuborildi ✅`, kbMain);
-    await exportLeadToTopic(ctx, mem);
-    const next = nextStage(mem);
-    await setMem(ctx.from.id, { stage: next });
-    if (next === 'done') return finalize(ctx, mem);
-    await askStage(ctx, { ...mem, stage: next }, true);
-  } else {
-    await ctx.reply('Kontaktni ola olmadim. Tugmani qayta bosing yoki raqamni yozing.');
-  }
-});
+// ==== Router ====
+bot.on('text', async (ctx) => {
+  const text = (ctx.message.text || '').trim();
 
-// Callback — due inline tugmalar
-bot.on('callback_query', async (ctx) => {
-  const d = ctx.callbackQuery?.data || '';
-  let mem = await getMem(ctx.from.id);
-  if (d.startsWith('due_')) {
-    if (d === 'due_today')    mem = await setMem(ctx.from.id, { due: 'bugun' });
-    if (d === 'due_tomorrow') mem = await setMem(ctx.from.id, { due: 'ertaga' });
-    if (d === 'due_custom')   await ctx.reply('Yaxshi! Sana/vaqtni yozib yuboring (masalan: “Ertaga 11:30”).');
-    await ctx.answerCbQuery('Tanlandi');
-    const next = nextStage(mem);
-    await setMem(ctx.from.id, { stage: next });
-    if (next === 'done') return finalize(ctx, mem);
-    await askStage(ctx, { ...mem, stage: next }, true);
+  // STARTDAN keyin tez-tez kerak bo‘ladigan qisqa javoblar:
+  if (/^(xizmat|xizmatlar)$/i.test(text)) { await send(ctx, servicesText); return; }
+  if (/^portfolio$/i.test(text)) { await send(ctx, 'https://t.me/JonBranding'); return; }
+  if (/^aloqa$/i.test(text)) {
+    await send(ctx, 'Telefon: +998 33 645 00 97\nTelegram: @baxtiyorjongaziyev', mainKB);
     return;
   }
+
+  // Agar bosqich allaqachon tugagan bo‘lsa — takror savol bermaymiz
+  if (ctx.session.stage === 'done') {
+    await send(ctx, 'Rahmat! Ma’lumotlar yozildi. Yana savol bo‘lsa yoza olasiz.', mainKB);
+    return;
+  }
+
+  // Matndan foydali narsalarni olish
+  const upd = extractFromText(text);
+  Object.assign(ctx.session.lead, mergeNew(ctx.session.lead, upd));
+  ctx.session.stage = nextStage(ctx.session.lead);
+
+  if (ctx.session.stage !== 'done') {
+    await askByStage(ctx, true);
+  } else {
+    await finalizeLead(ctx);
+  }
+});
+
+// ==== Callbacks (muddat/budjet) ====
+bot.on('callback_query', async (ctx) => {
+  const d = ctx.callbackQuery?.data || '';
+  if (!d) return ctx.answerCbQuery();
+
+  if (d.startsWith('due_')) {
+    const map = { due_today: 'bugun', due_tomorrow: 'ertaga', due_week: 'shu hafta' };
+    ctx.session.lead.due ??= map[d] || null;
+    await ctx.answerCbQuery('Tanlandi: ' + ctx.session.lead.due);
+    if (!ctx.session.lead.budget) {
+      await send(ctx, 'Taxminiy budjet diapazoni qaysi biri?', budgetKB);
+      ctx.session.stage = 'budget';
+    } else {
+      ctx.session.stage = nextStage(ctx.session.lead);
+      await askByStage(ctx, true);
+    }
+    return;
+  }
+
+  if (d.startsWith('b_')) {
+    const map = { b_min: 'minimal', b_mid: 'o‘rtacha', b_max: 'kengaytirilgan' };
+    ctx.session.lead.budget ??= map[d] || null;
+    await ctx.answerCbQuery('Tanlandi: ' + ctx.session.lead.budget);
+    ctx.session.stage = nextStage(ctx.session.lead);
+    await askByStage(ctx, true);
+    return;
+  }
+
   await ctx.answerCbQuery();
 });
 
-// Advisor AI + memory
-bot.on('text', async (ctx) => {
-  const userText = ctx.message.text?.trim() || '';
-  let mem = await getMem(ctx.from.id);
-
-  // Extract + merge
-  const facts = extractFacts(userText);
-  mem = mergeMem(mem, facts);
-  const next = nextStage(mem);
-  mem = await setMem(ctx.from.id, { ...mem, stage: next });
-
-  // Advisor javobi (narx kiritilmagan branchda)
-  const ai = await geminiReply(userText, { pushyOff: ctx.session.pushyOff, mem });
-  if (ai && !shouldCooldown(ctx, `ai:${mem.stage}`)) await ctx.reply(ai);
-
-  // Tez tugmalar
-  if (facts.pack && !mem.due)     await ctx.reply('Muddatni tanlang 👇', kbDueInline);
-  if (!mem.contact)               await ctx.reply('Bog‘lanish uchun “📱 Kontaktimni yuborish” tugmasini bosing 👇', kbContact);
-
-  // Keyingi bosqich savoli
-  if (next !== 'done') {
-    await askStage(ctx, mem);
-    return;
+// ==== Kontakt tugmasi ====
+bot.on('contact', async (ctx) => {
+  const phone = ctx.message?.contact?.phone_number;
+  if (phone) {
+    ctx.session.lead.contact = phone.startsWith('+') ? phone : ('+' + phone.replace(/\D/g, ''));
+    await send(ctx, `✔️ Kontakt oldim: ${ctx.session.lead.contact}`, mainKB);
+  } else {
+    await send(ctx, 'Kontaktni ola olmadim. Tugmani qayta bosing yoki raqamni yozing.', contactKB);
   }
-  await finalize(ctx, mem);
+  ctx.session.stage = nextStage(ctx.session.lead);
+  if (ctx.session.stage === 'done') await finalizeLead(ctx);
+  else await askByStage(ctx, true);
 });
 
-// Health & debug
-bot.command('status', async (ctx) => {
-  const m = await getMem(ctx.from.id);
-  await ctx.reply(
-`Status:
-• Xizmat: ${m.pack || '-'}
-• Soha: ${m.industry || '-'}
-• Muddat: ${m.due || '-'}
-• Maqsad: ${(m.goals||[]).slice(-1)[0] || '-'}
-• Muammo: ${(m.pains||[]).slice(-1)[0] || '-'}
-• Kontakt: ${m.contact || '-'}
-• Stage: ${m.stage}`
-);
+// ==== /id — tashxis ====
+bot.command('id', async (ctx) => {
+  const chatId = ctx.chat?.id;
+  const threadId = ctx.message?.message_thread_id;
+  await send(ctx, `Chat ID: ${chatId}\nTopic ID: ${threadId ?? '(topicda yuboring)'}`);
 });
-bot.command('health', (ctx) => ctx.reply('OK ✅'));
 
-// Launch
-bot.launch().then(() => console.log('Jon.Branding AI bot (memory+no-price) running...'));
+// ==== Helperlar ====
+function extractFromText(text) {
+  const t = text.toLowerCase();
+
+  // xizmat
+  let service = null;
+  if (/naming/.test(t)) service = 'Naming';
+  else if (/brandbook|brand book/.test(t)) service = 'Brandbook';
+  else if (/(korporativ|uslub|ku)/.test(t)) service = 'Korporativ uslub';
+  else if (/logo/.test(t)) service = 'Logo';
+
+  // muddat
+  let due = null;
+  if (/bugun/.test(t)) due = 'bugun';
+  else if (/ertaga/.test(t)) due = 'ertaga';
+  else if (/hafta/.test(t)) due = 'shu hafta';
+  else {
+    const m = t.match(/(\d{1,2}:\d{2})|(\d{1,2}\s*(kun|hafta|oy))/);
+    if (m) due = m[0];
+  }
+
+  // budjet — oddiy so‘zlar
+  let budget = null;
+  if (/minimal|arzon/.test(t)) budget = 'minimal';
+  else if (/o'?rtacha/.test(t)) budget = 'o‘rtacha';
+  else if (/kengaytirilgan|qimmat/.test(t)) budget = 'kengaytirilgan';
+
+  // kontakt — @username yoki telefon
+  let contact = text.match(/@[\w_]+|\+?\d[\d\s\-()]{7,}/)?.[0] || null;
+
+  return { service, due, budget, contact };
+}
+function mergeNew(dst, src) {
+  // faqat bo‘sh joylarga yozamiz
+  return {
+    service: dst.service || src.service || null,
+    due:     dst.due     || src.due     || null,
+    budget:  dst.budget  || src.budget  || null,
+    contact: dst.contact || src.contact || null
+  };
+}
+function nextStage(l) {
+  if (!l.service) return 'service';
+  if (!l.due)     return 'due';
+  if (!l.budget)  return 'budget';
+  if (!l.contact) return 'contact';
+  return 'done';
+}
+async function askByStage(ctx, force = false) {
+  const s = ctx.session.stage;
+  if (s === 'service') {
+    await send(ctx, servicesText, mainKB);
+  } else if (s === 'due') {
+    await send(ctx, 'Qachon kerak? “Bugun”, “Ertaga” yoki “Shu hafta” — tugmalardan birini tanlang, yoki o‘zingiz yozing.', timeKB);
+  } else if (s === 'budget') {
+    await send(ctx, 'Taxminiy budjet diapazoni? (Minimal / O‘rtacha / Kengaytirilgan)', budgetKB);
+  } else if (s === 'contact') {
+    await send(ctx, 'Bog‘lanish uchun “📱 Kontaktimni yuborish” tugmasini bosing 👇', contactKB);
+  }
+}
+
+function leadSummary(l, ctx) {
+  const who = `${ctx.from?.first_name || ''} ${ctx.from?.last_name || ''}`.trim() || '@' + (ctx.from?.username || '');
+  return (
+`🆕 Yangi lead
+👤 Mijoz: ${who} (@${ctx.from?.username || '-'})
+📞 Kontakt: ${l.contact || '-'}
+🧩 Xizmat: ${l.service || '-'}
+⏰ Muddat: ${l.due || '-'}
+💰 Budjet: ${l.budget || '-'}
+🕒 ${new Date().toLocaleString('uz-UZ')}`
+  );
+}
+
+async function finalizeLead(ctx) {
+  const l = ctx.session.lead;
+  await send(ctx,
+`✔️ Yozib oldim:
+• Xizmat: ${l.service}
+• Muddat: ${l.due}
+• Budjet: ${l.budget}
+• Kontakt: ${l.contact}
+
+Rahmat! Menejer tez orada bog‘lanadi. Yana savol bo‘lsa bemalol yozing.`, mainKB);
+
+  // (ixtiyoriy) Team guruhidagi CRM topicga yuborish
+  if (LEADS_CHAT_ID && LEADS_TOPIC_ID) {
+    try {
+      await ctx.telegram.sendMessage(
+        LEADS_CHAT_ID,
+        leadSummary(l, ctx),
+        { message_thread_id: LEADS_TOPIC_ID }
+      );
+    } catch (e) { console.error('TG topic lead error:', e?.message); }
+  }
+
+  ctx.session.stage = 'done';
+}
+
+// ==== Error guard ====
+bot.catch((err, ctx) => {
+  console.error('Bot error', ctx.update?.update_id, err);
+  try { send(ctx, 'Serverda kichik nosozlik. Birozdan so‘ng qayta urinib ko‘ring.'); } catch {}
+});
+
+// ==== Run ====
+bot.launch().then(() => console.log('JonGPT Business Assistant running…'));
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
