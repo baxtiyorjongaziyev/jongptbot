@@ -1,15 +1,17 @@
-// JonGPT — qisqa maslahatchi bot: xizmat -> muddat -> kontakt -> tasdiq (+ CRM topic ixtiyoriy)
+// JonGPT — qisqa maslahatchi bot: xizmat -> muddat -> kontakt -> tasdiq (+ CRM topic yuborish)
+// Business DM (Bots for Business) qo'llab-quvvatlanadi.
 import 'dotenv/config';
 import { Telegraf, Markup, session } from 'telegraf';
 
-// === ENV ===
-const BOT_TOKEN       = process.env.BOT_TOKEN;                   // Telegram bot token
-const WEBSITE_URL     = process.env.WEBSITE_URL || 'https://jonbranding.uz';
+// === ENV / CONFIG ===
+const BOT_TOKEN       = process.env.BOT_TOKEN; // Bot token (env)
+const WEBSITE_URL     = process.env.WEBSITE_URL   || 'https://jonbranding.uz';
 const PORTFOLIO_URL   = process.env.PORTFOLIO_URL || 'https://t.me/JonBranding';
-const OWNER_TG        = process.env.OWNER_TG || '@baxtiyorjongaziyev';
+const OWNER_TG        = process.env.OWNER_TG      || '@baxtiyorjongaziyev';
 
-const LEADS_CHAT_ID   = process.env.LEADS_CHAT_ID;               // -100... (ixtiyoriy)
-const LEADS_TOPIC_ID  = Number(process.env.LEADS_TOPIC_ID || 0); // topic thread id (ixtiyoriy)
+// --- CRM: env bo'lmasa ham, siz bergan default ID'lar ishlaydi ---
+const LEADS_CHAT_ID   = Number(process.env.LEADS_CHAT_ID  || -1002566480563); // Jon Branding Team
+const LEADS_TOPIC_ID  = Number(process.env.LEADS_TOPIC_ID || 52);             // CRM topic
 
 if (!BOT_TOKEN) {
   console.error('❌ BOT_TOKEN yo‘q. Railway -> Variables’dan kiriting.');
@@ -64,9 +66,9 @@ bot.use(session());
 bot.use((ctx, next) => {
   ctx.session ??= {};
   ctx.session.data ??= {
-    service: null,       // 'Naming' | 'Logo' | 'Korporativ uslub' | 'Brandbook'
-    due:    null,        // 'bugun' | 'ertaga' | 'shu hafta' | custom
-    contact:null         // phone/@username
+    service: null,   // 'Naming' | 'Logo' | 'Korporativ uslub' | 'Brandbook'
+    due:    null,    // 'bugun' | 'ertaga' | 'shu hafta' | custom
+    contact:null     // phone/@username
   };
   ctx.session.stage ??= 'service';   // 'service' -> 'due' -> 'contact' -> 'done'
   return next();
@@ -187,10 +189,8 @@ bot.on('contact', async (ctx) => {
 bot.on('text', async (ctx) => {
   const t = (ctx.message.text || '').trim();
 
-  // Oddiy shartlar
   if (/^menyu$/i.test(t)) return send(ctx, 'Menyu', mainKb);
 
-  // Agar “service” bosqichida bo‘lsa — matndan xizmatni aniqlash
   if (ctx.session.stage === 'service') {
     const s = detectService(t);
     if (s) {
@@ -198,11 +198,9 @@ bot.on('text', async (ctx) => {
       ctx.session.stage = 'due';
       return askStage(ctx, true);
     }
-    // Qisqa yo‘l: foydalanuvchini tugmalarga qaytarish
     return askStage(ctx, true);
   }
 
-  // “due” bosqichi: tayyor so‘zlar yoki har qanday matn
   if (ctx.session.stage === 'due') {
     const d = detectDue(t);
     if (d) {
@@ -210,10 +208,9 @@ bot.on('text', async (ctx) => {
       ctx.session.stage = 'contact';
       return askStage(ctx, true);
     }
-    return askStage(ctx); // eslatma
+    return askStage(ctx);
   }
 
-  // “contact” bosqichi: @username yoki telefonni ushlash
   if (ctx.session.stage === 'contact') {
     const c = detectContact(t);
     if (c) {
@@ -221,16 +218,15 @@ bot.on('text', async (ctx) => {
       ctx.session.stage = 'done';
       return finalize(ctx);
     }
-    return askStage(ctx); // eslatma
+    return askStage(ctx);
   }
 
-  // “done” bo‘lsa: qo‘shimcha savollarga odob bilan javob va menyu
   if (ctx.session.stage === 'done') {
     return send(ctx, 'Rahmat! Buyurtma qabul qilindi. Yana savol bo‘lsa yozing yoki “📞 Konsultatsiya” ni bosing.', mainKb);
   }
 });
 
-// === Yakunlash + CRM topic ga yuborish (ixtiyoriy) ===
+// === Yakunlash + CRM topic ga yuborish ===
 async function finalize(ctx) {
   const p = ctx.session.data;
   const txt =
@@ -246,30 +242,29 @@ Rahmat! Menejer tez orada bog‘lanadi. Portfolio yoki saytni ko‘rib chiqasizm
     [ Markup.button.url('📷 Portfolio', PORTFOLIO_URL) ]
   ]));
 
-  // CRM topic (agar sozlangan bo‘lsa)
-  if (LEADS_CHAT_ID && LEADS_TOPIC_ID) {
+  // ---- CRM topic'ga ham yuboramiz (siz bergan ID'lar bilan) ----
+  try {
     const who = `${ctx.from?.first_name || ''} ${ctx.from?.last_name || ''}`.trim()
               || `@${ctx.from?.username || '-'}`;
     const crm =
 `🆕 Lead
-👤 ${who} (id: ${ctx.from?.id})
-🧩 Xizmat: ${p.service}
-⏰ Muddat: ${p.due}
-📱 Kontakt: ${p.contact}
+👤 ${who} (@${ctx.from?.username || '-'}) | id: ${ctx.from?.id}
+🧩 Xizmat: ${p.service || '-'}
+⏰ Muddat: ${p.due || '-'}
+📱 Kontakt: ${p.contact || '-'}
 🕒 ${new Date().toLocaleString('uz-UZ')}`;
-    try {
-      await ctx.telegram.sendMessage(
-        LEADS_CHAT_ID,
-        crm,
-        { message_thread_id: LEADS_TOPIC_ID }
-      );
-    } catch (e) {
-      console.error('CRM topic xabari xatosi:', e.message);
-    }
+
+    await ctx.telegram.sendMessage(
+      LEADS_CHAT_ID,
+      crm,
+      { message_thread_id: LEADS_TOPIC_ID }
+    );
+  } catch (e) {
+    console.error('CRM topic xabari xatosi:', e?.message);
   }
 }
 
-// === Detektorlar (soddalashtirilgan) ===
+// === Detektorlar ===
 function detectService(text = '') {
   const t = text.toLowerCase();
   if (/\bnaming\b|nom/i.test(t)) return 'Naming';
@@ -283,8 +278,7 @@ function detectDue(text = '') {
   if (/bugun/.test(t)) return 'bugun';
   if (/ertaga/.test(t)) return 'ertaga';
   if (/hafta|shu hafta/.test(t)) return 'shu hafta';
-  // “Ertaga 11:30” kabi erkin matn — “shu hafta” deb qabul qilamiz
-  if (/\d{1,2}[:.]\d{2}/.test(t)) return 'shu hafta';
+  if (/\d{1,2}[:.]\d{2}/.test(t)) return 'shu hafta'; // Erkin vaqt — umumlashtiramiz
   return null;
 }
 function detectContact(text = '') {
@@ -302,6 +296,6 @@ bot.catch((err, ctx) => {
 });
 
 // === RUN ===
-bot.launch().then(() => console.log('JonGPT — maslahat/lead bot ishga tushdi.'));
+bot.launch().then(() => console.log('JonGPT — maslahat/lead bot (CRM topic bilan) ishga tushdi.'));
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
