@@ -51,7 +51,7 @@ const consultIK = Markup.inlineKeyboard([
 
 const contactKb = Markup.keyboard([
   [ Markup.button.contactRequest('📱 Kontaktimni yuborish') ],
-  ['↩️ Ortga', '❌ Bekor qilish']
+  ['⬅️ Menyu']
 ]).resize();
 
 const serviceIK = Markup.inlineKeyboard([
@@ -85,13 +85,20 @@ bot.hears('📷 Portfolio', (ctx) => send(
   Markup.inlineKeyboard([[Markup.button.url('🔗 Portfolio kanali', PORTFOLIO_URL)]])
 ));
 
+// 🔧 ALOQA — tel: URL tugmasi olib tashlandi, kontakt share tugmasi qo‘shildi
 bot.hears('☎️ Aloqa', (ctx) => send(
   ctx,
-  `Telefon: +998 33 645 00 97\nTelegram: ${OWNER_TG}\nIsh vaqti: Du–Shan 10:00–19:00`,
-  Markup.inlineKeyboard([
-    [Markup.button.url('📞 Qo‘ng‘iroq qilish', 'tel:+998336450097')],
-    [Markup.button.url('✉️ Telegram yozish', `https://t.me/${OWNER_TG.replace('@','')}`)]
-  ])
+  `Telefon: +998 33 645 00 97
+Telegram: ${OWNER_TG}
+Ish vaqti: Du–Shan 10:00–19:00
+
+Raqamingizni ulashsangiz, tezda qo‘ng‘iroq qilamiz 👇`,
+  {
+    ...Markup.inlineKeyboard([
+      [Markup.button.url('✉️ Telegram yozish', `https://t.me/${OWNER_TG.replace('@','')}`)]
+    ]),
+    ...contactKb
+  }
 ));
 
 bot.hears('📞 Konsultatsiya', (ctx) =>
@@ -181,7 +188,7 @@ bot.on('contact', async (ctx) => {
     ctx.session.data.contact = phone;
     await send(ctx, `✔️ Kontakt oldim: ${phone}`, mainKb);
     ctx.session.stage = 'done';
-    return finalize(ctx);
+    return finalize(ctx); // finalize ichida CRM topic'ga ham yuboriladi
   }
 });
 
@@ -242,7 +249,7 @@ Rahmat! Menejer tez orada bog‘lanadi. Portfolio yoki saytni ko‘rib chiqasizm
     [ Markup.button.url('📷 Portfolio', PORTFOLIO_URL) ]
   ]));
 
-  // ---- CRM topic'ga ham yuboramiz (siz bergan ID'lar bilan) ----
+  // ---- CRM topic'ga yuborish (siz bergan ID'lar bilan) ----
   try {
     const who = `${ctx.from?.first_name || ''} ${ctx.from?.last_name || ''}`.trim()
               || `@${ctx.from?.username || '-'}`;
