@@ -1,3 +1,4 @@
+// index.js
 // JonGPT — lead to‘plash bot (PRIVATE only) → CRM topic export
 // Guruhlarda jim turadi. Business DM (Bots for Business) qo‘llab-quvvatlanadi.
 
@@ -76,11 +77,15 @@ bot.use((ctx, next) => {
 // Faqat /id buyrug‘iga ruxsat (guruhda ham).
 bot.use(async (ctx, next) => {
   const type = ctx.chat?.type;
-  const text = ctx.update?.message?.text || ctx.update?.callback_query?.data || '';
+  const text =
+    ctx.update?.message?.text ||
+    ctx.update?.callback_query?.data ||
+    ctx.update?.message?.entities?.some(e => e.type === 'bot_command') && ctx.update?.message?.text ||
+    '';
 
   // Guruh/superguruh — sukut. Faqat /id ishlasin.
   if (type === 'group' || type === 'supergroup') {
-    if (text === '/id' || text?.startsWith('/id ')) {
+    if (String(text).startsWith('/id')) {
       const chatId = ctx.chat?.id;
       const threadId = ctx.message?.message_thread_id;
       try {
@@ -323,7 +328,11 @@ bot.catch((err, ctx) => {
   try { send(ctx, 'Serverda kichik nosozlik. Bir ozdan keyin qayta urinib ko‘ring.', mainKb); } catch {}
 });
 
-// ====== RUN ======
-bot.launch().then(() => console.log('JonGPT — PRIVATE-only lead bot (CRM topic eksporti bilan) ishga tushdi.'));
+// ====== RUN (polling by default) ======
+bot.launch().then(() => {
+  console.log('✅ JonGPT — PRIVATE-only lead bot (CRM topic eksporti bilan) ishga tushdi.');
+});
+
+// Graceful shutdown (Railway)
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
