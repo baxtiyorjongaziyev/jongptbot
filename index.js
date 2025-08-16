@@ -1,24 +1,25 @@
-// JonGPT — qisqa maslahatchi bot: xizmat -> muddat -> kontakt -> tasdiq (+ CRM topic yuborish)
-// Business DM (Bots for Business) qo'llab-quvvatlanadi.
+// JonGPT — lead to‘plash bot (PRIVATE only) → CRM topic export
+// Guruhlarda jim turadi. Business DM (Bots for Business) qo‘llab-quvvatlanadi.
+
 import 'dotenv/config';
 import { Telegraf, Markup, session } from 'telegraf';
 
-// === ENV / CONFIG ===
-const BOT_TOKEN       = process.env.BOT_TOKEN; // Bot token (env)
+// ====== ENV / CONFIG ======
+const BOT_TOKEN       = process.env.BOT_TOKEN; // Railway Variables -> BOT_TOKEN
 const WEBSITE_URL     = process.env.WEBSITE_URL   || 'https://jonbranding.uz';
 const PORTFOLIO_URL   = process.env.PORTFOLIO_URL || 'https://t.me/JonBranding';
 const OWNER_TG        = process.env.OWNER_TG      || '@baxtiyorjongaziyev';
 
-// --- CRM: env bo'lmasa ham, siz bergan default ID'lar ishlaydi ---
-const LEADS_CHAT_ID   = Number(process.env.LEADS_CHAT_ID  || -1002566480563); // Jon Branding Team
-const LEADS_TOPIC_ID  = Number(process.env.LEADS_TOPIC_ID || 52);             // CRM topic
+// CRM topic (default: siz berganlari)
+const LEADS_CHAT_ID   = Number(process.env.LEADS_CHAT_ID  || -1002566480563);
+const LEADS_TOPIC_ID  = Number(process.env.LEADS_TOPIC_ID || 52);
 
 if (!BOT_TOKEN) {
   console.error('❌ BOT_TOKEN yo‘q. Railway -> Variables’dan kiriting.');
   process.exit(1);
 }
 
-// === BOT ===
+// ====== BOT ======
 const bot = new Telegraf(BOT_TOKEN);
 
 // Business messages uchun qo‘shimcha
@@ -36,7 +37,7 @@ async function send(ctx, text, extra = {}) {
   return ctx.telegram.sendMessage(chatId, text, { ...extra, ...bcExtra(ctx) });
 }
 
-// === UI ===
+// ====== UI ======
 const mainKb = Markup.keyboard([
   ['📦 Paketlar', '🗒️ Buyurtma (AI)'],
   ['📞 Konsultatsiya', '📷 Portfolio'],
@@ -61,31 +62,51 @@ const serviceIK = Markup.inlineKeyboard([
   [ Markup.button.callback('3) Brandbook', 'srv_brandbook') ]
 ]);
 
-// === Session (state) ===
+// ====== Session (state) ======
 bot.use(session());
 bot.use((ctx, next) => {
   ctx.session ??= {};
-  ctx.session.data ??= {
-    service: null,   // 'Naming' | 'Logo' | 'Korporativ uslub' | 'Brandbook'
-    due:    null,    // 'bugun' | 'ertaga' | 'shu hafta' | custom
-    contact:null     // phone/@username
-  };
-  ctx.session.stage ??= 'service';   // 'service' -> 'due' -> 'contact' -> 'done'
+  ctx.session.data ??= { service: null, due: null, contact: null };
+  ctx.session.stage ??= 'service'; // service -> due -> contact -> done
   return next();
 });
 
-// === Statik tugmalar ===
-bot.hears(['⬅️ Menyu', '/menu'], (ctx) =>
-  send(ctx, 'Menyu', mainKb)
+// ====== 🔒 PRIVATE-ONLY GATE ======
+// Guruhlarda bot javob bermasligi uchun global filter.
+// Faqat /id buyrug‘iga ruxsat (guruhda ham).
+bot.use(async (ctx, next) => {
+  const type = ctx.chat?.type;
+  const text = ctx.update?.message?.text || ctx.update?.callback_query?.data || '';
+
+  // Guruh/superguruh — sukut. Faqat /id ishlasin.
+  if (type === 'group' || type === 'supergroup') {
+    if (text === '/id' || text?.startsWith('/id ')) {
+      const chatId = ctx.chat?.id;
+      const threadId = ctx.message?.message_thread_id;
+      try {
+        await send(ctx, `Chat ID: ${chatId}\nTopic ID: ${threadId ?? '(topicda yozsangiz chiqadi)'}`);
+      } catch {}
+    }
+    return; // boshqa hamma narsada jim turamiz
+  }
+
+  // Kanal hamda noma’lum turlarda ham jim
+  if (type && type !== 'private') return;
+
+  // private bo‘lsa davom
+  return next();
+});
+
+// ====== Statik tugmalar (faqat PRIVATE da ishlaydi) ======
+bot.hears(['⬅️ Menyu', '/menu'], (ctx) => send(ctx, 'Menyu', mainKb));
+
+bot.hears('📷 Portfolio', (ctx) =>
+  send(ctx, `To‘liq portfolio: ${PORTFOLIO_URL}`,
+    Markup.inlineKeyboard([[Markup.button.url('🔗 Portfolio kanali', PORTFOLIO_URL)]])
+  )
 );
 
-bot.hears('📷 Portfolio', (ctx) => send(
-  ctx,
-  `To‘liq portfolio: ${PORTFOLIO_URL}`,
-  Markup.inlineKeyboard([[Markup.button.url('🔗 Portfolio kanali', PORTFOLIO_URL)]])
-));
-
-// 🔧 ALOQA — tel: URL tugmasi olib tashlandi, kontakt share tugmasi qo‘shildi
+// Aloqa: tel: URL yo‘q, kontakt share + tg link
 bot.hears('☎️ Aloqa', (ctx) => send(
   ctx,
   `Telefon: +998 33 645 00 97
@@ -118,12 +139,11 @@ Qisqacha yozing yoki tugmani bosing.`,
   )
 );
 
-// “AI” tugmasi — hozir foydalanuvchini qisqacha yozishga undaydi
 bot.hears('🗒️ Buyurtma (AI)', (ctx) =>
   send(ctx, 'Qisqacha yozing: xizmat (Naming/Logo/Korporativ uslub/Brandbook), muddat (“bugun/ertaga/hafta”), kontakt (@username yoki telefon).', mainKb)
 );
 
-// === /start ===
+// ====== /start (PRIVATE) ======
 bot.start(async (ctx) => {
   ctx.session = {
     data: { service: null, due: null, contact: null },
@@ -133,7 +153,7 @@ bot.start(async (ctx) => {
   await askStage(ctx, true);
 });
 
-// === Bosqich savollari ===
+// ====== Bosqich savollari ======
 async function askStage(ctx, force=false) {
   const st = ctx.session.stage;
   if (st === 'service') {
@@ -150,7 +170,7 @@ async function askStage(ctx, force=false) {
   }
 }
 
-// === Callbacklar (inline tugmalar) ===
+// ====== Callbacklar (inline tugmalar) ======
 bot.on('callback_query', async (ctx) => {
   const d = ctx.callbackQuery?.data || '';
   if (!d) return ctx.answerCbQuery();
@@ -181,18 +201,19 @@ bot.on('callback_query', async (ctx) => {
   await ctx.answerCbQuery();
 });
 
-// === Kontakt tugmasi (share contact) ===
+// ====== Kontakt tugmasi (share contact) ======
 bot.on('contact', async (ctx) => {
+  // PRIVATE gate yuqorida bor — bu handler guruhda chaqirilmaydi
   const phone = ctx.message?.contact?.phone_number;
   if (phone) {
     ctx.session.data.contact = phone;
     await send(ctx, `✔️ Kontakt oldim: ${phone}`, mainKb);
     ctx.session.stage = 'done';
-    return finalize(ctx); // finalize ichida CRM topic'ga ham yuboriladi
+    return finalize(ctx); // CRM ga yuborish finalize ichida
   }
 });
 
-// === Matn routeri ===
+// ====== Matn routeri (PRIVATE) ======
 bot.on('text', async (ctx) => {
   const t = (ctx.message.text || '').trim();
 
@@ -233,7 +254,7 @@ bot.on('text', async (ctx) => {
   }
 });
 
-// === Yakunlash + CRM topic ga yuborish ===
+// ====== Yakunlash + CRM topic ga yuborish ======
 async function finalize(ctx) {
   const p = ctx.session.data;
   const txt =
@@ -249,7 +270,7 @@ Rahmat! Menejer tez orada bog‘lanadi. Portfolio yoki saytni ko‘rib chiqasizm
     [ Markup.button.url('📷 Portfolio', PORTFOLIO_URL) ]
   ]));
 
-  // ---- CRM topic'ga yuborish (siz bergan ID'lar bilan) ----
+  // CRM topic'ga yuborish
   try {
     const who = `${ctx.from?.first_name || ''} ${ctx.from?.last_name || ''}`.trim()
               || `@${ctx.from?.username || '-'}`;
@@ -271,7 +292,7 @@ Rahmat! Menejer tez orada bog‘lanadi. Portfolio yoki saytni ko‘rib chiqasizm
   }
 }
 
-// === Detektorlar ===
+// ====== Detektorlar ======
 function detectService(text = '') {
   const t = text.toLowerCase();
   if (/\bnaming\b|nom/i.test(t)) return 'Naming';
@@ -285,7 +306,7 @@ function detectDue(text = '') {
   if (/bugun/.test(t)) return 'bugun';
   if (/ertaga/.test(t)) return 'ertaga';
   if (/hafta|shu hafta/.test(t)) return 'shu hafta';
-  if (/\d{1,2}[:.]\d{2}/.test(t)) return 'shu hafta'; // Erkin vaqt — umumlashtiramiz
+  if (/\d{1,2}[:.]\d{2}/.test(t)) return 'shu hafta'; // erkin format — umumiylashtiramiz
   return null;
 }
 function detectContact(text = '') {
@@ -296,13 +317,13 @@ function detectContact(text = '') {
   return null;
 }
 
-// === Xatoliklar ===
+// ====== Xatoliklar ======
 bot.catch((err, ctx) => {
   console.error('Bot error:', err);
   try { send(ctx, 'Serverda kichik nosozlik. Bir ozdan keyin qayta urinib ko‘ring.', mainKb); } catch {}
 });
 
-// === RUN ===
-bot.launch().then(() => console.log('JonGPT — maslahat/lead bot (CRM topic bilan) ishga tushdi.'));
+// ====== RUN ======
+bot.launch().then(() => console.log('JonGPT — PRIVATE-only lead bot (CRM topic eksporti bilan) ishga tushdi.'));
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
